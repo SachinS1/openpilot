@@ -15,6 +15,12 @@ from openpilot.selfdrive.controls.lib.drive_helpers import CONTROL_N, get_speed_
 from openpilot.selfdrive.car.cruise import V_CRUISE_MAX, V_CRUISE_UNSET
 from openpilot.common.swaglog import cloudlog
 
+from selfdrive.controls.lib.longitudinal_mpc_lib.PID_follower import VelocityProfilePID
+
+import csv, datetime
+import time
+from selfdrive.controls.lib.longitudinal_mpc_lib import params
+
 LON_MPC_STEP = 0.2  # first step is 0.2s
 A_CRUISE_MIN = -1.2
 A_CRUISE_MAX_VALS = [1.6, 1.2, 0.8, 0.6]
@@ -22,6 +28,8 @@ A_CRUISE_MAX_BP = [0., 10.0, 25., 40.]
 CONTROL_N_T_IDX = ModelConstants.T_IDXS[:CONTROL_N]
 ALLOW_THROTTLE_THRESHOLD = 0.5
 MIN_ALLOW_THROTTLE_SPEED = 2.5
+
+start_time = time.time()
 
 # Lookup table for turns
 _A_TOTAL_MAX_V = [1.7, 3.2]
@@ -34,6 +42,9 @@ def get_max_accel(v_ego):
 def get_coast_accel(pitch):
   return np.sin(pitch) * -5.65 - 0.3  # fitted from data using xx/projects/allow_throttle/compute_coast_accel.py
 
+def get_T_FOLLOW_const():
+  desired_time_gap = 0.8 # second
+  return desired_time_gap
 
 def limit_accel_in_turns(v_ego, angle_steers, a_target, CP):
   """
@@ -82,6 +93,39 @@ class LongitudinalPlanner:
     self.a_desired_trajectory = np.zeros(CONTROL_N)
     self.j_desired_trajectory = np.zeros(CONTROL_N)
     self.solverExecutionTime = 0.0
+    self.last_accel = 0
+    leader_path = params.csv_file
+    self.vpid = VelocityProfilePID(leader_path, kp=0.6, ki=0.2, kd=0.05, dt=0.05)
+    self.previous_accleration = 0.0
+
+    self.current_time = datetime.datetime.now().strftime("%Y-%m-%d_%H_%M_%S")
+    self.log_path = None
+    self.is_openpilot_engaged = False
+    self.start_data_logging = False
+    self.logging_started = False
+    self.init_csv()
+
+
+  def init_csv(self):
+    if self.is_openpilot_engaged and not self.logging_started:
+      self.current_time = datetime.datetime.now().strftime("%Y-%m-%d_%H_%M_%S")
+      self.log_path = f"control_log_lead_{self.current_time}.csv" # uncomment this for time stamped log files
+      # self.log_path = "control_log_ego_lead.csv"
+      with open(self.log_path, mode="w", newline="") as file:
+        writer = csv.writer(file)
+        writer.writerow(["timestep", "speed", "acceleration", "target_speed"])
+        self.logging_started = True
+        print(f"Logging started. Data will be written to: {self.log_path}")
+    elif not self.is_openpilot_engaged and self.logging_started:
+      self.logging_started = False
+      print(f"Logging stopped. Data was saved to: {self.log_path}")
+      self.log_path = None
+
+  def log_to_csv(self, elapsed_time, v_ego, a_ego, target_vel):
+    if self.is_openpilot_engaged and self.logging_started:
+      with open(self.log_path, mode="a", newline="") as file:
+        writer = csv.writer(file)
+        writer.writerow([elapsed_time, v_ego, a_ego, target_vel])
 
   @staticmethod
   def parse_model(model_msg, model_error):
@@ -104,14 +148,16 @@ class LongitudinalPlanner:
     return x, v, a, j, throttle_prob
 
   def update(self, sm):
-    self.mpc.mode = 'blended' if sm['selfdriveState'].experimentalMode else 'acc'
-
+    # self.mpc.mode = 'blended' if sm['selfdriveState'].experimentalMode else 'acc'
+    self.mpc.mode = 'acc'
+    self.is_openpilot_engaged = sm['selfdriveState'].enabled
     if len(sm['carControl'].orientationNED) == 3:
       accel_coast = get_coast_accel(sm['carControl'].orientationNED[1])
     else:
       accel_coast = ACCEL_MAX
 
     v_ego = sm['carState'].vEgo
+    a_ego = sm['carState'].aEgo
     v_cruise_kph = min(sm['carState'].vCruise, V_CRUISE_MAX)
     v_cruise = v_cruise_kph * CV.KPH_TO_MS
     v_cruise_initialized = sm['carState'].vCruise != V_CRUISE_UNSET
@@ -126,6 +172,28 @@ class LongitudinalPlanner:
 
     # No change cost when user is controlling the speed, or when standstill
     prev_accel_constraint = not (reset_state or sm['carState'].standstill)
+
+    elapsed_time = time.time() - start_time
+
+    self.action, target_vel = self.vpid.step(v_meas=v_ego)
+
+    if self.is_openpilot_engaged:
+      if not self.logging_started:
+        self.start_data_logging = True
+        print("Openpilot engaged and started data logging!")
+        self.init_csv()
+    else:
+      if self.logging_started:
+        self.start_data_logging = False
+        self.init_csv()
+
+    # self.log_to_csv(elapsed_time, v_ego, lead_speed, current_distance_gap, a_ego)
+    self.log_to_csv(elapsed_time, v_ego, a_ego, target_vel)
+
+    print(f"Desired speed: {target_vel:.2f}")
+    print(f"Current speed: {v_ego:.2f}")
+
+    self.current_time = datetime.datetime.now().strftime("%Y-%m-%d_%H_%M_%S")
 
     if self.mpc.mode == 'acc':
       accel_limits = [A_CRUISE_MIN, get_max_accel(v_ego)]
@@ -142,9 +210,17 @@ class LongitudinalPlanner:
 
     # Prevent divergence, smooth in current v_ego
     self.v_desired_filter.x = max(0.0, self.v_desired_filter.update(v_ego))
-    # Compute model v_ego error
-    self.v_model_error = get_speed_error(sm['modelV2'], v_ego)
-    x, v, a, j, throttle_prob = self.parse_model(sm['modelV2'], self.v_model_error)
+
+    t_follow = get_T_FOLLOW_const()
+    throttle_prob = 1.0
+    # current_pos = x1[0]
+
+    # x,v,a,j = self.CACC.predict_traj(sm['carState'], sm['radarState], t_follow, self.previous_accleration, current_pos)
+
+
+    v, a, j = np.ones(13), np.ones(13), np.ones(13)
+    self.previous_accleration = self.action
+
     # Don't clip at low speeds since throttle_prob doesn't account for creep
     self.allow_throttle = throttle_prob > ALLOW_THROTTLE_THRESHOLD or v_ego <= MIN_ALLOW_THROTTLE_SPEED
 
@@ -159,24 +235,23 @@ class LongitudinalPlanner:
     accel_limits_turns[0] = min(accel_limits_turns[0], self.a_desired + 0.05)
     accel_limits_turns[1] = max(accel_limits_turns[1], self.a_desired - 0.05)
 
-    self.mpc.set_weights(prev_accel_constraint, personality=sm['selfdriveState'].personality)
-    self.mpc.set_accel_limits(accel_limits_turns[0], accel_limits_turns[1])
-    self.mpc.set_cur_state(self.v_desired_filter.x, self.a_desired)
-    self.mpc.update(sm['radarState'], v_cruise, x, v, a, j, personality=sm['selfdriveState'].personality)
+    self.v_desired_trajectory = v[:13]
+    self.a_desired_trajectory = a[:13]
+    self.j_desired_trajectory = j[:12]
 
-    self.v_desired_trajectory = np.interp(CONTROL_N_T_IDX, T_IDXS_MPC, self.mpc.v_solution)
-    self.a_desired_trajectory = np.interp(CONTROL_N_T_IDX, T_IDXS_MPC, self.mpc.a_solution)
-    self.j_desired_trajectory = np.interp(CONTROL_N_T_IDX, T_IDXS_MPC[:-1], self.mpc.j_solution)
+    self.v_desired_trajectory = np.interp(CONTROL_N_T_IDX, T_IDXS_MPC, self.v_desired_trajectory)
+    self.a_desired_trajectory = np.interp(CONTROL_N_T_IDX, T_IDXS_MPC, self.a_desired_trajectory)
+    self.j_desired_trajectory = np.interp(CONTROL_N_T_IDX, T_IDXS_MPC[:-1], self.j_desired_trajectory)
 
     # TODO counter is only needed because radar is glitchy, remove once radar is gone
     self.fcw = self.mpc.crash_cnt > 2 and not sm['carState'].standstill
     if self.fcw:
       cloudlog.info("FCW triggered")
-
     # Interpolate 0.05 seconds and save as starting point for next iteration
     a_prev = self.a_desired
     self.a_desired = float(np.interp(self.dt, CONTROL_N_T_IDX, self.a_desired_trajectory))
     self.v_desired_filter.x = self.v_desired_filter.x + self.dt * (self.a_desired + a_prev) / 2.0
+
 
   def publish(self, sm, pm):
     plan_send = messaging.new_message('longitudinalPlan')
@@ -192,15 +267,15 @@ class LongitudinalPlanner:
     longitudinalPlan.accels = self.a_desired_trajectory.tolist()
     longitudinalPlan.jerks = self.j_desired_trajectory.tolist()
 
-    longitudinalPlan.hasLead = sm['radarState'].leadOne.status
+    longitudinalPlan.hasLead = True
     longitudinalPlan.longitudinalPlanSource = self.mpc.source
     longitudinalPlan.fcw = self.fcw
 
     action_t =  self.CP.longitudinalActuatorDelay + DT_MDL
     a_target, should_stop = get_accel_from_plan(longitudinalPlan.speeds, longitudinalPlan.accels,
                                                 action_t=action_t, vEgoStopping=self.CP.vEgoStopping)
-    longitudinalPlan.aTarget = float(a_target)
-    longitudinalPlan.shouldStop = bool(should_stop)
+    longitudinalPlan.aTarget = float(self.action)
+    longitudinalPlan.shouldStop = False
     longitudinalPlan.allowBrake = True
     longitudinalPlan.allowThrottle = bool(self.allow_throttle)
 
