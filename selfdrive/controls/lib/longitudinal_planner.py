@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 import math
 import numpy as np
+import csv
+import datetime
 
 import cereal.messaging as messaging
 from opendbc.car.interfaces import ACCEL_MIN, ACCEL_MAX
@@ -82,6 +84,12 @@ class LongitudinalPlanner:
     self.a_desired_trajectory = np.zeros(CONTROL_N)
     self.j_desired_trajectory = np.zeros(CONTROL_N)
     self.solverExecutionTime = 0.0
+    self.rec_dt = 0.05          # 20 Hz
+    self.rec_k = 0              # sample index
+    self.rec_log_path = f"speed_log_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+
+    with open(self.rec_log_path, "w", newline="") as f:
+      csv.writer(f).writerow(["timestep", "speed"])
 
   @staticmethod
   def parse_model(model_msg, model_error):
@@ -112,6 +120,12 @@ class LongitudinalPlanner:
       accel_coast = ACCEL_MAX
 
     v_ego = sm['carState'].vEgo
+
+    timestep = self.rec_k * self.rec_dt
+    with open(self.rec_log_path, "a", newline="") as f:
+      csv.writer(f).writerow([f"{timestep:.2f}", v_ego])
+    self.rec_k += 1
+
     v_cruise_kph = min(sm['carState'].vCruise, V_CRUISE_MAX)
     v_cruise = v_cruise_kph * CV.KPH_TO_MS
     v_cruise_initialized = sm['carState'].vCruise != V_CRUISE_UNSET
