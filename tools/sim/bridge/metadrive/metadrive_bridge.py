@@ -29,6 +29,22 @@ def curve_block(length, angle=45, direction=0):
 
 def create_map(track_size=60):
   curve_len = track_size * 2
+  # return dict(
+  #   type=MapGenerateMethod.PG_MAP_FILE,
+  #   lane_num=2,
+  #   lane_width=4.5,
+  #   config=[
+  #     None,
+  #     straight_block(track_size),
+  #     curve_block(curve_len, 90),
+  #     straight_block(track_size),
+  #     curve_block(curve_len, 90),
+  #     straight_block(track_size),
+  #     curve_block(curve_len, 90),
+  #     straight_block(track_size),
+  #     curve_block(curve_len, 90),
+  #   ]
+  # )
   return dict(
     type=MapGenerateMethod.PG_MAP_FILE,
     lane_num=2,
@@ -36,16 +52,19 @@ def create_map(track_size=60):
     config=[
       None,
       straight_block(track_size),
-      curve_block(curve_len, 90),
-      straight_block(track_size),
-      curve_block(curve_len, 90),
-      straight_block(track_size),
-      curve_block(curve_len, 90),
-      straight_block(track_size),
-      curve_block(curve_len, 90),
     ]
   )
 
+def create_large_straight_road(track_size=30, num_straight_blocks = 100):
+  return dict(
+    type=MapGenerateMethod.PG_MAP_FILE,
+    lane_num=2,
+    lane_width=4.5,
+    config=[
+      None,
+      *[straight_block(track_size) for _ in range(num_straight_blocks)]
+    ]
+  )
 
 class MetaDriveBridge(SimulatorBridge):
   TICKS_PER_FRAME = 5
@@ -82,12 +101,13 @@ class MetaDriveBridge(SimulatorBridge):
       crash_object_done=False,
       arrive_dest_done=False,
       traffic_density=0.0, # traffic is incredibly expensive
-      map_config=create_map(),
+      map_config=create_large_straight_road(),
       decision_repeat=1,
       physics_world_step_size=self.TICKS_PER_FRAME/100,
       preload_models=False,
       show_logo=False,
-      anisotropic_filtering=False
+      anisotropic_filtering=False,
+      map_region_size = 1024
     )
 
     return MetaDriveWorld(queue, config, self.test_duration, self.test_run, self.dual_camera)
