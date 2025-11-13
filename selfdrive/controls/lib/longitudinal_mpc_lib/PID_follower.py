@@ -1,6 +1,6 @@
 import csv
 import numpy as np
-
+from selfdrive.controls.lib.longitudinal_mpc_lib import params
 
 class VelocityProfilePID:
   """
@@ -11,12 +11,11 @@ class VelocityProfilePID:
   - Output: desired acceleration [m/s^2]
   """
 
-  def __init__(self, csv_path: str, kp: float = 0.6, ki: float = 0.2, kd: float = 0.05,
-               dt: float = 0.05, accel_min: float = -5.0, accel_max: float = 5.0):
-    self.kp = kp
-    self.ki = ki
-    self.kd = kd
-    self.dt = dt
+  def __init__(self, csv_path: str, accel_min: float = -5.0, accel_max: float = 5.0):
+    self.kp = params.kp
+    self.ki = params.ki
+    self.kd = params.kd
+    self.dt = 0.05
     self.accel_min = accel_min
     self.accel_max = accel_max
 

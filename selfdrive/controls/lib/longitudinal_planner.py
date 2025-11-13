@@ -76,7 +76,7 @@ def get_accel_from_plan(speeds, accels, action_t=DT_MDL, vEgoStopping=0.05):
                  v_target_1sec < vEgoStopping)
   return a_target, should_stop
 
-
+import os
 class LongitudinalPlanner:
   def __init__(self, CP, init_v=0.0, init_a=0.0, dt=DT_MDL):
     self.CP = CP
@@ -95,7 +95,8 @@ class LongitudinalPlanner:
     self.solverExecutionTime = 0.0
     self.last_accel = 0
     leader_path = params.csv_file
-    self.vpid = VelocityProfilePID(leader_path, kp=0.6, ki=0.2, kd=0.05, dt=0.05)
+    
+    self.vpid = VelocityProfilePID(leader_path)
     self.previous_accleration = 0.0
 
     self.current_time = datetime.datetime.now().strftime("%Y-%m-%d_%H_%M_%S")
@@ -103,7 +104,10 @@ class LongitudinalPlanner:
     self.is_openpilot_engaged = False
     self.start_data_logging = False
     self.logging_started = False
+    self.csv_rows=1
     self.init_csv()
+    self.cumulative_speed_track_error = 0
+    
 
 
   def init_csv(self):
@@ -113,7 +117,7 @@ class LongitudinalPlanner:
       # self.log_path = "control_log_ego_lead.csv"
       with open(self.log_path, mode="w", newline="") as file:
         writer = csv.writer(file)
-        writer.writerow(["timestep", "speed", "acceleration", "target_speed"])
+        writer.writerow(["timestep", "speed", "acceleration", "target_speed", "RMS_Speed"])
         self.logging_started = True
         print(f"Logging started. Data will be written to: {self.log_path}")
     elif not self.is_openpilot_engaged and self.logging_started:
@@ -125,7 +129,16 @@ class LongitudinalPlanner:
     if self.is_openpilot_engaged and self.logging_started:
       with open(self.log_path, mode="a", newline="") as file:
         writer = csv.writer(file)
-        writer.writerow([elapsed_time, v_ego, a_ego, target_vel])
+        if self.csv_rows==1:
+          self.cumulative_speed_track_error = (v_ego-target_vel)**2
+        else:
+          self.cumulative_speed_track_error=1/(self.csv_rows)*((self.csv_rows-1)*self.cumulative_speed_track_error+(v_ego-target_vel)**2)
+        #print("CSV ROWS")
+        #print(self.csv_rows)
+
+
+        writer.writerow([elapsed_time, v_ego, a_ego, target_vel,np.sqrt(self.cumulative_speed_track_error)])
+        self.csv_rows=self.csv_rows+1
 
   @staticmethod
   def parse_model(model_msg, model_error):
@@ -190,8 +203,9 @@ class LongitudinalPlanner:
     # self.log_to_csv(elapsed_time, v_ego, lead_speed, current_distance_gap, a_ego)
     self.log_to_csv(elapsed_time, v_ego, a_ego, target_vel)
 
-    print(f"Desired speed: {target_vel:.2f}")
-    print(f"Current speed: {v_ego:.2f}")
+    #print(f"Desired speed: {target_vel:.2f}")
+    #print(f"Current speed: {v_ego:.2f}")
+    print(f"Cumulative RMS Speed Error: {np.sqrt(self.cumulative_speed_track_error):.2f}")
 
     self.current_time = datetime.datetime.now().strftime("%Y-%m-%d_%H_%M_%S")
 
