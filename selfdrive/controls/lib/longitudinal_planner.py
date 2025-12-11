@@ -14,7 +14,7 @@ from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import T_IDX
 from openpilot.selfdrive.controls.lib.drive_helpers import CONTROL_N, get_speed_error
 from openpilot.selfdrive.car.cruise import V_CRUISE_MAX, V_CRUISE_UNSET
 from openpilot.common.swaglog import cloudlog
-
+import threading, socket
 from selfdrive.controls.lib.longitudinal_mpc_lib.PID_follower import VelocityProfilePID
 
 import csv, datetime
@@ -95,7 +95,7 @@ class LongitudinalPlanner:
     self.solverExecutionTime = 0.0
     self.last_accel = 0
     leader_path = params.csv_file
-    
+
     self.vpid = VelocityProfilePID(leader_path)
     self.previous_accleration = 0.0
 
@@ -107,7 +107,9 @@ class LongitudinalPlanner:
     self.csv_rows=1
     self.init_csv()
     self.cumulative_speed_track_error = 0
-    
+    self.external_flag_received = False
+    self.start_flag_listener()
+
 
 
   def init_csv(self):
@@ -188,7 +190,12 @@ class LongitudinalPlanner:
 
     elapsed_time = time.time() - start_time
 
-    self.action, target_vel = self.vpid.step(v_meas=v_ego)
+    if not self.external_flag_received:
+      self.action = 0.0
+      target_vel = 0.0
+    else:
+      print("External flag received,...")
+      self.action, target_vel = self.vpid.step(v_meas=v_ego)
 
     if self.is_openpilot_engaged:
       if not self.logging_started:
@@ -294,3 +301,28 @@ class LongitudinalPlanner:
     longitudinalPlan.allowThrottle = bool(self.allow_throttle)
 
     pm.send('longitudinalPlan', plan_send)
+
+  def start_flag_listener(self):
+    """Start background thread to receive external start flag."""
+    listener_thread = threading.Thread(target=self._udp_flag_receiver, daemon=True)
+    listener_thread.start()
+
+  def _udp_flag_receiver(self):
+      PORT = 50505
+      sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+      sock.bind(("0.0.0.0", PORT))
+      print(f"[Planner] Waiting for external INTENT flag on UDP {PORT}...")
+
+      while True:
+          data, addr = sock.recvfrom(4096)
+          try:
+              msg = data.decode("utf-8").strip()
+          except:
+              continue
+
+          print(f"[Planner] Received flag from {addr}: {msg}")
+
+          if msg == "INTENT_SENDER_ACTIVE":
+              self.external_flag_received = True
+              print("[Planner] External START flag acknowledged!")
+              return   # stop listening after activation
