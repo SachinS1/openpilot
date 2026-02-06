@@ -94,9 +94,9 @@ class LongitudinalPlanner:
     self.j_desired_trajectory = np.zeros(CONTROL_N)
     self.solverExecutionTime = 0.0
     self.last_accel = 0
-    leader_path = params.csv_file
+    self.leader_path = params.csv_file
 
-    self.vpid = VelocityProfilePID(leader_path)
+    self.vpid = VelocityProfilePID(self.leader_path)
     self.previous_accleration = 0.0
 
     self.current_time = datetime.datetime.now().strftime("%Y-%m-%d_%H_%M_%S")
@@ -308,21 +308,39 @@ class LongitudinalPlanner:
     listener_thread.start()
 
   def _udp_flag_receiver(self):
-      PORT = 50505
-      sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-      sock.bind(("0.0.0.0", PORT))
-      print(f"[Planner] Waiting for external INTENT flag on UDP {PORT}...")
+    PORT = 50505
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.bind(("0.0.0.0", PORT))
+    print(f"[Planner] Waiting for external INTENT flag on UDP {PORT}...")
 
-      while True:
-          data, addr = sock.recvfrom(4096)
-          try:
-              msg = data.decode("utf-8").strip()
-          except:
-              continue
+    flag_to_file = {
+    "1": "1_I280.csv",
+    "2": "2_I280.csv",
+    "3": "3_I280.csv",
+    "4": "4_hwfet.csv",
+    "5": "5_us06.csv",
+    "6": "6_10mph.csv",
+    "7": "7_20mph.csv",
+    }
 
-          print(f"[Planner] Received flag from {addr}: {msg}")
+    while True:
+      data, addr = sock.recvfrom(4096)
+      try:
+        msg = data.decode("utf-8").strip()
+      except:
+        continue
 
-          if msg == "INTENT_SENDER_ACTIVE":
-              self.external_flag_received = True
-              print("[Planner] External START flag acknowledged!")
-              return   # stop listening after activation
+      print(f"[Planner] Received flag from {addr}: {msg}")
+
+      if msg in flag_to_file:
+        leader_dir = os.path.dirname(self.leader_path)
+        params.csv_file = os.path.join(leader_dir, flag_to_file[msg])
+        self.vpid = VelocityProfilePID(params.csv_file)
+        self.external_flag_received = True
+        print(f"[Planner] External START flag acknowledged! Using {params.csv_file}")
+        return   # stop listening after activation
+
+      if msg == "INTENT_SENDER_ACTIVE":
+        self.external_flag_received = True
+        print("[Planner] External START flag acknowledged!")
+        return   # stop listening after activation
